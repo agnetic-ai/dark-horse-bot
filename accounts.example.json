@@ -1,0 +1,16 @@
+[
+  {
+    "handle": "your_x_handle",
+    "sessionCookie": "your_genesis_session_cookie_here",
+    "torUserId": "tor_dhorse_001",
+    "torExitIp": "127.0.0.1",
+    "walletAddress": "",
+    "tier": "user",
+    "points": 0,
+    "claimable": 0.0,
+    "claimed": 0.0,
+    "checkinToday": false,
+    "checkinDays": 0,
+    "lastRunAt": null
+  }
+]

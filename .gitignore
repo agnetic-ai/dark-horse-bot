@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Private Credentials & Account Data (STRICT DO NOT COMMIT)
+accounts.json
+*.session
+*.txt
+!requirements.txt
+*.log
+
+# Environment variables
+.env
+.env.local
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & Editor caches
+.idea/
+.vscode/
+*.swp
+*.swo
