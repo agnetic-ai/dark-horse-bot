@@ -62,11 +62,16 @@ def get_client(acc: dict) -> httpx.Client:
     return client
 
 
-def process_account(acc: dict) -> None:
+def process_account(acc: dict, quiet: bool = False) -> dict:
     handle = acc.get("handle", "unknown")
-    print(f"\n==================================================")
-    print(f">>> Processing Account: @{handle}")
-    print(f"==================================================")
+    log = (lambda msg: sys.stderr.write(msg + "\n")) if quiet else print
+
+    log(f"\n==================================================")
+    log(f">>> Processing Account: @{handle}")
+    log(f"==================================================")
+
+    claimed_amount = 0.0
+    checkin_now = False
 
     client = get_client(acc)
     try:
@@ -74,20 +79,38 @@ def process_account(acc: dict) -> None:
         try:
             ip = client.get("https://api.ipify.org?format=json").json().get("ip")
             acc["torExitIp"] = ip
-            print(f"  Tor Exit IP: {ip}")
+            log(f"  Tor Exit IP: {ip}")
         except Exception as e:
-            print(f"  Tor IP check error: {e}")
+            log(f"  Tor IP check error: {e}")
 
         # 2. Verify Session & Profile
         r_me = client.get("https://genesis.dhorse.fun/api/me")
         if r_me.status_code == 401 or "NOT_SIGNED_IN" in r_me.text:
-            print(f"  FAILED: Session expired for @{handle}. Please update sessionCookie.")
+            log(f"  FAILED: Session expired for @{handle}. Please update sessionCookie.")
             acc["sessionStatus"] = "expired"
-            return
+            return {
+                "handle": handle,
+                "status": "expired",
+                "tier": acc.get("tier", "user"),
+                "points": acc.get("points", 0),
+                "claimed": 0.0,
+                "claimable": acc.get("claimable", 0.0),
+                "streak": acc.get("checkinDays", 0),
+                "checkin_now": False,
+            }
 
         if r_me.status_code != 200:
-            print(f"  Warning: GET /api/me returned {r_me.status_code}: {r_me.text[:80]}")
-            return
+            log(f"  Warning: GET /api/me returned {r_me.status_code}: {r_me.text[:80]}")
+            return {
+                "handle": handle,
+                "status": "error",
+                "tier": acc.get("tier", "user"),
+                "points": acc.get("points", 0),
+                "claimed": 0.0,
+                "claimable": acc.get("claimable", 0.0),
+                "streak": acc.get("checkinDays", 0),
+                "checkin_now": False,
+            }
 
         me = r_me.json()
         acc["sessionStatus"] = "active"
@@ -98,21 +121,22 @@ def process_account(acc: dict) -> None:
         acc["checkinToday"] = me.get("checkinToday", False)
         acc["checkinDays"] = me.get("checkinDays", 0)
 
-        print(f"  Profile: Tier={acc['tier']} | Points={acc['points']} | Streak={acc['checkinDays']} days")
+        log(f"  Profile: Tier={acc['tier']} | Points={acc['points']} | Streak={acc['checkinDays']} days")
 
         # 3. Daily Check-in
         if not acc["checkinToday"]:
-            print("  Performing Daily Check-in...")
+            log("  Performing Daily Check-in...")
             r_checkin = client.post("https://genesis.dhorse.fun/api/checkin", json={})
             if r_checkin.status_code == 200:
                 c_data = r_checkin.json()
                 acc["checkinToday"] = True
                 acc["checkinDays"] = c_data.get("checkinDays", acc["checkinDays"] + 1)
-                print(f"  Check-in SUCCESS: Day {acc['checkinDays']} claimed!")
+                checkin_now = True
+                log(f"  Check-in SUCCESS: Day {acc['checkinDays']} claimed!")
             else:
-                print(f"  Check-in error: {r_checkin.status_code} {r_checkin.text}")
+                log(f"  Check-in error: {r_checkin.status_code} {r_checkin.text}")
         else:
-            print(f"  Check-in already completed today (Day {acc['checkinDays']}).")
+            log(f"  Check-in already completed today (Day {acc['checkinDays']}).")
 
         # 4. Mining Status & Claim
         r_mstatus = client.get("https://genesis.dhorse.fun/api/mining/status")
@@ -128,55 +152,111 @@ def process_account(acc: dict) -> None:
             acc["dailyRate"] = daily_rate
             acc["effectivePower"] = eff_power
 
-            print(
+            log(
                 f"  Mining: Power={eff_power} | DailyRate={daily_rate}/day | "
                 f"Claimable={claimable:.4f} | Total Claimed={claimed_total:.4f}"
             )
 
             # Check threshold for claim
             if claimable >= MIN_CLAIM_THRESHOLD:
-                print(f"  Claimable reward ({claimable:.4f}) reached threshold ({MIN_CLAIM_THRESHOLD}). Claiming...")
+                log(f"  Claimable reward ({claimable:.4f}) reached threshold ({MIN_CLAIM_THRESHOLD}). Claiming...")
                 r_claim = client.post("https://genesis.dhorse.fun/api/mining/claim", json={})
                 if r_claim.status_code == 200:
                     claim_res = r_claim.json()
-                    claimed_amount = claim_res.get("claimed", claimable)
-                    print(f"  Mining Claim SUCCESS: +{claimed_amount} points!")
+                    claimed_val = claim_res.get("claimed", claimable)
+                    try:
+                        claimed_amount = float(claimed_val)
+                    except Exception:
+                        claimed_amount = float(claimable)
+                    log(f"  Mining Claim SUCCESS: +{claimed_amount} points!")
                     # Refresh profile
                     r_me_updated = client.get("https://genesis.dhorse.fun/api/me")
                     if r_me_updated.status_code == 200:
                         acc["points"] = r_me_updated.json().get("points", acc["points"])
                 elif r_claim.status_code == 409:
-                    print(f"  Server notice: Claim queued/waiting for next epoch threshold.")
+                    log(f"  Server notice: Claim queued/waiting for next epoch threshold.")
                 else:
-                    print(f"  Mining claim error: {r_claim.status_code} {r_claim.text}")
+                    log(f"  Mining claim error: {r_claim.status_code} {r_claim.text}")
             else:
-                print(
+                log(
                     f"  Mining claimable is {claimable:.4f} (under {MIN_CLAIM_THRESHOLD} threshold). "
                     f"Will claim automatically when ready."
                 )
 
         acc["lastRunAt"] = datetime.now(timezone.utc).isoformat()
-        print(f"  Account @{acc['handle']} update completed.")
+        log(f"  Account @{acc['handle']} update completed.")
 
     except Exception as e:
-        print(f"  Error processing @{handle}: {e}")
+        log(f"  Error processing @{handle}: {e}")
     finally:
         client.close()
 
+    return {
+        "handle": acc.get("handle", handle),
+        "status": acc.get("sessionStatus", "active"),
+        "tier": acc.get("tier", "user"),
+        "points": acc.get("points", 0),
+        "claimed": claimed_amount,
+        "claimable": acc.get("claimable", 0.0),
+        "streak": acc.get("checkinDays", 0),
+        "checkin_now": checkin_now,
+    }
 
-def run_all() -> None:
+
+def format_report(results: list) -> str:
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [
+        "## Dark Horse Genesis Fleet",
+        f"*{now_str}*",
+        "",
+        "| Account | Points | Claimed | Claimable | Streak | Status |",
+        "|:--|--:|--:|--:|:--|:--|",
+    ]
+    total_points = 0
+    total_claimed = 0.0
+    for r in results:
+        pts = r.get("points", 0)
+        total_points += pts
+        cl = r.get("claimed", 0.0)
+        total_claimed += cl
+        cl_str = f"+{cl:.0f}" if cl > 0 else "-"
+        streak_str = f"Day {r.get('streak', 0)}" + (" ✓" if r.get("checkin_now") else "")
+        status_str = "OK" if r.get("status") == "active" else "EXPIRED"
+        lines.append(
+            f"| @{r['handle']} | {pts:,} | {cl_str} | {r.get('claimable', 0.0):.2f} | {streak_str} | {status_str} |"
+        )
+    lines.append("")
+    cl_total_str = f"+{total_claimed:.0f}" if total_claimed > 0 else "-"
+    lines.append(
+        f"**Total Accounts:** {len(results)} | **Total Points:** {total_points:,} | **Round Claimed:** {cl_total_str}"
+    )
+    return "\n".join(lines)
+
+
+def run_all(report_mode: bool = False) -> None:
     accounts = load_accounts()
     if not accounts:
-        print(f"No accounts found in {ACCOUNTS_FILE}.")
+        if report_mode:
+            print("## Dark Horse Genesis Fleet\n\nNo accounts found.")
+        else:
+            print(f"No accounts found in {ACCOUNTS_FILE}.")
         return
 
-    print(f"Starting Dark Horse Genesis cycle for {len(accounts)} account(s)...")
+    results = []
+    if not report_mode:
+        print(f"Starting Dark Horse Genesis cycle for {len(accounts)} account(s)...")
+
     for acc in accounts:
-        process_account(acc)
+        res = process_account(acc, quiet=report_mode)
+        results.append(res)
         time.sleep(2.0)
 
     save_accounts(accounts)
-    print("\nAll accounts processed successfully!")
+
+    if report_mode:
+        print(format_report(results))
+    else:
+        print("\nAll accounts processed successfully!")
 
 
 def show_status() -> None:
@@ -231,6 +311,7 @@ def main():
     parser.add_argument("action", choices=["run", "status", "add"], default="status", nargs="?")
     parser.add_argument("--handle", type=str, help="X (Twitter) handle for add action")
     parser.add_argument("--cookie", type=str, help="genesis_session cookie for add action")
+    parser.add_argument("--report", action="store_true", help="Output summary report in Markdown format")
     args = parser.parse_args()
 
     if args.action == "add":
@@ -239,7 +320,7 @@ def main():
             sys.exit(1)
         add_account(args.handle, args.cookie)
     elif args.action == "run":
-        run_all()
+        run_all(report_mode=args.report)
     else:
         show_status()
 
